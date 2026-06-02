@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { API_CONFIG } from '@/lib/endpoints';
 import {
   ArrowUp,
   Bot,
@@ -25,6 +26,7 @@ type LiveLectureRoomProps = {
 type TokenResponse = {
   token?: string;
   error?: string;
+  message?: string;
 };
 
 type TranscriptSegment = {
@@ -169,16 +171,35 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
     setConnectionState('connecting');
 
     try {
-      const tokenResponse = await fetch('/api/scribe-token', { method: 'POST' });
-      const tokenData = (await tokenResponse.json()) as TokenResponse;
+      const tokenEndpoint = `${API_CONFIG.BASE_URL}/api/scribe/token`;
+      const tokenResponse = await fetch(tokenEndpoint, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const tokenData = (await tokenResponse.json().catch(() => ({}))) as TokenResponse;
 
       if (!tokenResponse.ok) {
-        throw new Error(tokenData.error || 'Failed to create ElevenLabs token');
+        console.error('[ElevenLabs] Spring token auth failed', {
+          endpoint: tokenEndpoint,
+          status: tokenResponse.status,
+          error: tokenData.error || tokenData.message || tokenResponse.statusText,
+        });
+        throw new Error(tokenData.error || tokenData.message || 'Failed to create ElevenLabs token');
       }
 
       if (!tokenData.token) {
+        console.error('[ElevenLabs] Spring token response missing token', {
+          endpoint: tokenEndpoint,
+          status: tokenResponse.status,
+        });
         throw new Error('Token response did not include token');
       }
+
+      console.log('[ElevenLabs] Spring token auth success', {
+        endpoint: tokenEndpoint,
+        status: tokenResponse.status,
+        tokenPrefix: tokenData.token.slice(0, 8),
+      });
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -235,6 +256,10 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
           await audioContext.resume();
         }
 
+        console.log('[ElevenLabs] WebSocket auth success', {
+          modelId: 'scribe_v2_realtime',
+          languageCode: 'ko',
+        });
         setConnectionState('recording');
       };
 

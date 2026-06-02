@@ -11,7 +11,6 @@ services:
     environment:
       NEXT_PUBLIC_ORCHESTRATOR_BASE_URL: "http://localhost:${ORCHESTRATOR_PORT:-8080}"
       NEXT_PUBLIC_AGENT_WORKER_BASE_URL: "http://localhost:${AGENT_WORKER_PORT:-8765}"
-      ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY}"
     depends_on:
       orchestrator:
         condition: service_started
@@ -33,6 +32,7 @@ services:
       SPRING_DATASOURCE_PASSWORD: "${POSTGRES_PASSWORD:-capstone}"
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET}"
+      ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY}"
     depends_on:
       postgres:
         condition: service_healthy

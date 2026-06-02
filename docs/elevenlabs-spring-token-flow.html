@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ElevenLabs Token Issuance via Spring</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'base',
+      securityLevel: 'loose',
+      themeVariables: {
+        fontFamily: 'Inter, Pretendard, system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
+        primaryColor: '#eff6ff',
+        primaryTextColor: '#0f172a',
+        primaryBorderColor: '#2563eb',
+        lineColor: '#475569',
+        secondaryColor: '#ecfdf5',
+        tertiaryColor: '#f8fafc',
+        noteBkgColor: '#fffbeb',
+        noteTextColor: '#78350f'
+      }
+    });
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --blue: #2563eb;
+      --green: #059669;
+      --red: #dc2626;
+      --shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, #dbeafe 0, transparent 34rem), var(--bg);
+      color: var(--text);
+      font-family: Inter, Pretendard, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    main {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }
+
+    header {
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 10px;
+      border: 1px solid #bfdbfe;
+      border-radius: 999px;
+      background: rgba(239, 246, 255, 0.9);
+      color: #1d4ed8;
+      font-weight: 800;
+      font-size: 13px;
+    }
+
+    h1 {
+      margin: 16px 0 8px;
+      font-size: clamp(30px, 5vw, 54px);
+      line-height: 1.05;
+      letter-spacing: -0.05em;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 18px;
+      max-width: 780px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 22px;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 24px;
+      overflow: hidden;
+    }
+
+    .card h2 {
+      margin: 0 0 4px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+
+    .card p {
+      margin: 0 0 18px;
+      color: var(--muted);
+    }
+
+    .mermaid {
+      display: flex;
+      justify-content: center;
+      min-width: 860px;
+      padding: 8px 0;
+    }
+
+    .scroll {
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .notes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 22px;
+    }
+
+    .note {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: #f8fafc;
+      padding: 16px;
+    }
+
+    .note strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    .note span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    code {
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: #e2e8f0;
+      color: #0f172a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+
+    @media (max-width: 860px) {
+      main { width: min(100vw - 20px, 1180px); padding-top: 28px; }
+      .card { padding: 18px; border-radius: 18px; }
+      .notes { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Spring Auth + ElevenLabs Token</div>
+      <h1>ElevenLabs 토큰 발급 구조</h1>
+      <p class="subtitle">
+        API key는 Spring orchestrator만 보관. Browser는 인증 cookie로 Spring에 token 요청. 발급받은 single-use token으로 ElevenLabs Realtime Scribe WebSocket 직접 연결.
+      </p>
+    </header>
+
+    <section class="grid">
+      <article class="card">
+        <h2>1. Runtime Sequence</h2>
+        <p>사용자 인증 → 권한 확인 → ElevenLabs single-use token 발급 → WebSocket 전사.</p>
+        <div class="scroll">
+          <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant B as Browser / LiveLectureRoom
+    participant S as Spring Orchestrator
+    participant DB as Postgres
+    participant T as ElevenLabs Token API
+    participant W as ElevenLabs Realtime WS
+
+    U->>B: Click mic start
+    B->>S: POST /api/scribe/token<br/>Cookie: accessToken
+    S->>S: JWT validate<br/>@AuthenticationPrincipal
+    S->>DB: Verify authenticated user<br/>future: lecture auth check
+    DB-->>S: auth ok
+    S->>T: POST /v1/single-use-token/realtime_scribe<br/>Header xi-api-key
+    T-->>S: { token }
+    S-->>B: 200 { token }
+    B->>W: wss connect<br/>model_id + token + language_code=ko
+    loop while recording
+        B->>W: PCM16 audio chunks<br/>sample_rate=16000
+        W-->>B: partial_transcript
+        W-->>B: committed_transcript
+    end
+    U->>B: Stop mic
+    B->>W: commit + close
+          </pre>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>2. Service Layout</h2>
+        <p>Next API Route 제거. Spring이 발급 단일 관문.</p>
+        <div class="scroll">
+          <pre class="mermaid">
+flowchart LR
+    B[Browser<br/>LiveLectureRoom.tsx]
+    N[Next.js web<br/>UI only]
+    S[Spring orchestrator<br/>/api/scribe/token]
+    A[Spring Security<br/>JWT cookie auth]
+    DB[(Postgres<br/>users / lectures)]
+    E[ElevenLabs Token API<br/>single-use token]
+    W[ElevenLabs Realtime Scribe<br/>WebSocket]
+
+    B --> N
+    B -->|POST + credentials include| S
+    S --> A
+    A -->|authenticated userEmail| S
+    S -->|auth check| DB
+    S -->|xi-api-key server only| E
+    E -->|token| S
+    S -->|token| B
+    B -->|wss + token + mic audio| W
+    W -->|transcript events| B
+
+    subgraph SecretBoundary[Server Secret Boundary]
+      S
+      E
+    end
+
+    classDef browser fill:#eff6ff,stroke:#2563eb,color:#0f172a,stroke-width:2px;
+    classDef spring fill:#ecfdf5,stroke:#059669,color:#064e3b,stroke-width:2px;
+    classDef external fill:#fff7ed,stroke:#ea580c,color:#7c2d12,stroke-width:2px;
+    classDef db fill:#f8fafc,stroke:#475569,color:#0f172a,stroke-width:2px;
+
+    class B,N browser;
+    class S,A spring;
+    class E,W external;
+    class DB db;
+          </pre>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>3. Change Plan</h2>
+        <p>구현 체크리스트.</p>
+        <div class="scroll">
+          <pre class="mermaid">
+flowchart TD
+    A[Start] --> B[Move ELEVENLABS_API_KEY<br/>web env -> orchestrator env]
+    B --> C[Add application.yaml<br/>elevenlabs.api-key]
+    C --> D[Add ScribeTokenResponse DTO]
+    D --> E[Add ElevenLabsTokenService<br/>RestClient POST token API]
+    E --> F[Add Controller<br/>POST /api/scribe/token]
+    F --> G[Auth required<br/>do not permitAll]
+    G --> H[Lecture auth check]
+    H --> I[Update LiveLectureRoom fetch<br/>Spring endpoint + credentials include]
+    I --> J[Delete or ignore Next API route<br/>/api/scribe-token]
+    J --> K[Manual test<br/>login -> mic -> transcript]
+
+    classDef done fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef warn fill:#fffbeb,stroke:#d97706,color:#78350f;
+    class B,C,D,E,F,I,J done;
+    class G,H,K warn;
+          </pre>
+        </div>
+      </article>
+    </section>
+
+    <section class="notes">
+      <div class="note">
+        <strong class="green">좋은 점</strong>
+        <span>API key web 밖. Spring auth/권한/로그 한곳.</span>
+      </div>
+      <div class="note">
+        <strong>Endpoint 권장</strong>
+        <span><code>POST /api/lectures/{lectureId}/scribe-token</code></span>
+      </div>
+      <div class="note">
+        <strong class="red">주의</strong>
+        <span>Token endpoint 공개 금지. <code>permitAll</code> 넣지 말기.</span>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
