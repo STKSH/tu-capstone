@@ -24,9 +24,9 @@ public class Message {
     private Long id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "record_id", nullable = false)
+    @JoinColumn(name = "lecture_id", nullable = false)
     @OnDelete(action = OnDeleteAction.CASCADE)
-    private Record record;
+    private Lecture lecture;
 
     @Column(columnDefinition = "TEXT")
     private String content;

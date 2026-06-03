@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     provider VARCHAR(50),
     provider_id VARCHAR(255) UNIQUE,
     role VARCHAR(50),
+    status VARCHAR(50) DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS lectures (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     title VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'RECORDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_lecture_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -40,8 +42,7 @@ CREATE TABLE IF NOT EXISTS records (
     id BIGSERIAL PRIMARY KEY,
     lecture_id BIGINT NOT NULL UNIQUE,
     s3_audio_path VARCHAR(255),
-    s3_transcript_path VARCHAR(255),
-    s3_vector_path VARCHAR(255),
+    transcript TEXT,
     duration INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_record_lecture FOREIGN KEY (lecture_id) REFERENCES lectures(id) ON DELETE CASCADE
@@ -50,15 +51,15 @@ CREATE TABLE IF NOT EXISTS records (
 -- 5. messages 테이블
 CREATE TABLE IF NOT EXISTS messages (
     id BIGSERIAL PRIMARY KEY,
-    record_id BIGINT NOT NULL,
+    lecture_id BIGINT NOT NULL,
     content TEXT,
     is_agent BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_message_record FOREIGN KEY (record_id) REFERENCES records(id) ON DELETE CASCADE
+    CONSTRAINT fk_message_lecture FOREIGN KEY (lecture_id) REFERENCES lectures(id) ON DELETE CASCADE
 );
 
 -- 인덱스 추가 (조회 성능 향상)
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_lectures_user_id ON lectures(user_id);
 CREATE INDEX IF NOT EXISTS idx_records_lecture_id ON records(lecture_id);
-CREATE INDEX IF NOT EXISTS idx_messages_record_id ON messages(record_id);
+CREATE INDEX IF NOT EXISTS idx_messages_lecture_id ON messages(lecture_id);

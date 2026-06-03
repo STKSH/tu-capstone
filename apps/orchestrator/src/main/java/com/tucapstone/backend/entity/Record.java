@@ -33,19 +33,12 @@ public class Record {
     @Column(name = "s3_audio_path")
     private String s3AudioPath;
 
-    @Column(name = "s3_transcript_path")
-    private String s3TranscriptPath;
-
-    @Column(name = "s3_vector_path")
-    private String s3VectorPath;
+    @Column(columnDefinition = "TEXT")
+    private String transcript;
 
     private Integer duration;
 
     @CreatedDate
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
-
-    @Builder.Default
-    @OneToMany(mappedBy = "record", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<Message> messages = new ArrayList<>();
 }

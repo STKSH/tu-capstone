@@ -5,6 +5,7 @@ import com.tucapstone.backend.dto.response.TokenResponse;
 import com.tucapstone.backend.dto.response.UserResponse;
 import com.tucapstone.backend.entity.RefreshToken;
 import com.tucapstone.backend.entity.User;
+import com.tucapstone.backend.entity.UserStatus;
 import com.tucapstone.backend.repository.RefreshTokenRepository;
 import com.tucapstone.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -105,6 +106,10 @@ public class AuthService {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
         
+        if (user.getStatus() == UserStatus.WITHDRAWN) {
+            throw new RuntimeException("This account has been withdrawn.");
+        }
+        
         return UserResponse.builder()
                 .id(user.getId())
                 .email(user.getEmail())
@@ -118,7 +123,18 @@ public class AuthService {
     public void logout(String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
-        
+
+        refreshTokenRepository.deleteByUserId(user.getId());
+    }
+
+    @Transactional
+    public void withdraw(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        user.setStatus(UserStatus.WITHDRAWN);
+        userRepository.save(user);
+
         refreshTokenRepository.deleteByUserId(user.getId());
     }
 }

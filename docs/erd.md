@@ -67,4 +67,6 @@ created_at timestamp
 Ref: users.id < refresh_tokens.user_id
 Ref: users.id < lectures.user_id
 Ref: lectures.id - records.lecture_id
+Ref: lectures.id < messages.lecture_id
+res.id - records.lecture_id
 Ref: records.id < messages.record_id

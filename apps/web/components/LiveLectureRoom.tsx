@@ -2,25 +2,25 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API_CONFIG } from '@/lib/endpoints';
+import { apiFetch } from '@/lib/api';
+import localforage from 'localforage';
 import {
-  ArrowUp,
-  Bot,
   Download,
-  Maximize2,
   Mic,
   MicOff,
   PauseCircle,
   PhoneOff,
   Play,
   Search,
-  Settings2,
   Sparkles,
   StickyNote,
   Trash2,
+  BookOpen,
 } from 'lucide-react';
 
 type LiveLectureRoomProps = {
   onEnd?: () => void;
+  resumeId?: number;
 };
 
 type TokenResponse = {
@@ -40,6 +40,13 @@ type RealtimeScribeMessage = {
   text?: string;
   error?: string;
 };
+
+interface Lecture {
+  id: number;
+  title: string;
+  status: 'RECORDING' | 'PAUSED' | 'COMPLETED';
+  createdAt: string;
+}
 
 const initialTranscripts: TranscriptSegment[] = [];
 
@@ -110,12 +117,45 @@ function formatNowTime() {
   }).format(new Date());
 }
 
-export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
+export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProps) {
   const [segments, setSegments] = useState<TranscriptSegment[]>(initialTranscripts);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [partialTranscript, setPartialTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<'standby' | 'connecting' | 'recording'>('standby');
+  const [showRecoveryModal, setShowRecoveryModal] = useState(false);
+  const [isRecovering, setIsRecovering] = useState(false);
+
+  // New state for lecture creation flow
+  const [currentLectureId, setCurrentLectureId] = useState<number | null>(resumeId || null);
+  const [lectureTitle, setLectureTitle] = useState('');
+  const [showCreateModal, setShowCreateModal] = useState(!resumeId);
+  const [isCreating, setIsCreating] = useState(false);
+
+  // Fetch lecture if resuming
+  useEffect(() => {
+    if (resumeId) {
+      const fetchLecture = async () => {
+        try {
+          const data = await apiFetch<Lecture>(`/api/lectures/${resumeId}`);
+          setLectureTitle(data.title);
+          
+          // Fetch existing messages to populate segments
+          const messages = await apiFetch<any[]>(`/api/v1/messages/${resumeId}`);
+          const fetchedSegments = messages.map((m, idx) => ({
+            id: m.id?.toString() || idx.toString(),
+            time: formatElapsed(m.timestamp || 0),
+            text: m.content || m.message || ''
+          }));
+          setSegments(fetchedSegments);
+        } catch (err) {
+          console.error('Failed to resume lecture', err);
+          setError('강의 정보를 불러오지 못했습니다.');
+        }
+      };
+      fetchLecture();
+    }
+  }, [resumeId]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -124,11 +164,53 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const silentGainRef = useRef<GainNode | null>(null);
 
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
   const isRecording = connectionState === 'recording';
   const isConnecting = connectionState === 'connecting';
   const recordingTime = useMemo(() => formatElapsed(elapsedSeconds), [elapsedSeconds]);
 
+  // Create Lecture API Call
+  const handleCreateLecture = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!lectureTitle.trim()) return;
+
+    setIsCreating(true);
+    setError(null);
+    try {
+      const data = await apiFetch<{ id: number }>('/api/lectures', {
+        method: 'POST',
+        body: JSON.stringify({ title: lectureTitle }),
+      });
+      setCurrentLectureId(data.id);
+      setShowCreateModal(false);
+      console.log(`[Lecture] Created with ID: ${data.id}`);
+    } catch (err) {
+      console.error('Failed to create lecture', err);
+      setError('강의를 생성하지 못했습니다. 다시 시도해주세요.');
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  // Sync Transcript to Backend (Now Appending to Records)
+  const syncTranscriptToBackend = async (text: string) => {
+    if (!currentLectureId) return;
+    try {
+      await apiFetch(`/api/v1/records/${currentLectureId}/transcript`, {
+        method: 'POST',
+        body: JSON.stringify({ content: text }),
+      });
+    } catch (err) {
+      console.error('Failed to sync transcript to records', err);
+    }
+  };
+
   const cleanupAudio = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
     silentGainRef.current?.disconnect();
@@ -140,12 +222,14 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
     silentGainRef.current = null;
     streamRef.current = null;
     audioContextRef.current = null;
+    mediaRecorderRef.current = null;
   }, []);
 
-  const stop = useCallback(() => {
+  const handlePause = useCallback(async () => {
+    if (!currentLectureId) return;
     setError(null);
-
     const ws = wsRef.current;
+    
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         message_type: 'input_audio_chunk',
@@ -159,16 +243,101 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
     }
 
     wsRef.current = null;
+    
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const formData = new FormData();
+        formData.append('chunk', audioBlob, `chunk_${Date.now()}.webm`);
+
+        try {
+          await apiFetch(`/api/v1/records/${currentLectureId}/chunk`, {
+            method: 'POST',
+            body: formData,
+          });
+          await localforage.removeItem(`lecture_${currentLectureId}_chunks`);
+          audioChunksRef.current = [];
+          console.log('[Sync] Chunk uploaded successfully.');
+        } catch (err) {
+          console.error('[Sync] Failed to upload chunk', err);
+          setError('오디오 임시 저장 실패. 네트워크를 확인하세요.');
+        }
+      };
+      mediaRecorderRef.current.stop();
+    }
+
     cleanupAudio();
     setConnectionState('standby');
     setPartialTranscript('');
-  }, [cleanupAudio]);
+  }, [cleanupAudio, currentLectureId]);
+
+  const handleEnd = useCallback(async () => {
+    if (!currentLectureId) return;
+    setError(null);
+    const ws = wsRef.current;
+    
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        message_type: 'input_audio_chunk',
+        audio_base_64: '',
+        commit: true,
+        sample_rate: 16000,
+      }));
+      ws.close(1000, 'user stopped recording');
+    } else {
+      ws?.close();
+    }
+
+    wsRef.current = null;
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const formData = new FormData();
+        formData.append('audio', audioBlob, `final_${Date.now()}.webm`);
+        formData.append('duration', elapsedSeconds.toString());
+
+        try {
+          // 1. Final transcript aggregation
+          const fullTranscript = segments.map(s => s.text).join(' ');
+          if (fullTranscript.trim()) {
+            // Also sync to messages table for LangGraph context
+            await syncTranscriptToBackend(fullTranscript, true);
+            // Include in the final record saving request
+            formData.append('transcript', fullTranscript);
+          }
+
+          // 2. Audio and Transcript save to Records table
+          await apiFetch(`/api/v1/records/${currentLectureId}/save`, {
+            method: 'POST',
+            body: formData,
+          });
+          await localforage.removeItem(`lecture_${currentLectureId}_chunks`);
+          audioChunksRef.current = [];
+          console.log('[Sync] Final record saved.');
+          onEnd?.();
+        } catch (err) {
+          console.error('[Sync] Failed to save final record', err);
+          setError('최종 저장 실패.');
+        }
+      };
+      mediaRecorderRef.current.stop();
+    } else {
+       onEnd?.();
+    }
+
+    cleanupAudio();
+    setConnectionState('standby');
+    setPartialTranscript('');
+  }, [cleanupAudio, elapsedSeconds, currentLectureId, onEnd]);
+
 
   const start = useCallback(async () => {
-    if (connectionState !== 'standby') return;
+    if (connectionState !== 'standby' || !currentLectureId) return;
 
     setError(null);
     setConnectionState('connecting');
+    audioChunksRef.current = [];
 
     try {
       const tokenEndpoint = `${API_CONFIG.BASE_URL}/api/scribe/token`;
@@ -176,44 +345,42 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
         method: 'POST',
         credentials: 'include',
       });
-      const tokenData = (await tokenResponse.json().catch(() => ({}))) as TokenResponse;
+      
+      let tokenData: TokenResponse = {};
+      const tokenText = await tokenResponse.text();
+      if (tokenText) {
+        try {
+          tokenData = JSON.parse(tokenText) as TokenResponse;
+        } catch (e) {
+          console.error('Failed to parse token response', e);
+        }
+      }
 
       if (!tokenResponse.ok) {
-        console.error('[ElevenLabs] Spring token auth failed', {
-          endpoint: tokenEndpoint,
-          status: tokenResponse.status,
-          error: tokenData.error || tokenData.message || tokenResponse.statusText,
-        });
-        throw new Error(tokenData.error || tokenData.message || 'Failed to create ElevenLabs token');
+        throw new Error(tokenData.error || tokenData.message || 'ElevenLabs token failed');
       }
-
-      if (!tokenData.token) {
-        console.error('[ElevenLabs] Spring token response missing token', {
-          endpoint: tokenEndpoint,
-          status: tokenResponse.status,
-        });
-        throw new Error('Token response did not include token');
-      }
-
-      console.log('[ElevenLabs] Spring token auth success', {
-        endpoint: tokenEndpoint,
-        status: tokenResponse.status,
-        tokenPrefix: tokenData.token.slice(0, 8),
-      });
 
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
       });
       streamRef.current = stream;
 
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = async (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+          try {
+             await localforage.setItem(`lecture_${currentLectureId}_chunks`, audioChunksRef.current);
+          } catch(err) {}
+        }
+      };
+      mediaRecorder.start(1000);
+
       const url = new URL('wss://api.elevenlabs.io/v1/speech-to-text/realtime');
       url.searchParams.set('model_id', 'scribe_v2_realtime');
-      url.searchParams.set('token', tokenData.token);
+      url.searchParams.set('token', tokenData.token!);
       url.searchParams.set('commit_strategy', 'vad');
       url.searchParams.set('language_code', 'ko');
 
@@ -255,129 +422,180 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
         if (audioContext.state === 'suspended') {
           await audioContext.resume();
         }
-
-        console.log('[ElevenLabs] WebSocket auth success', {
-          modelId: 'scribe_v2_realtime',
-          languageCode: 'ko',
-        });
         setConnectionState('recording');
       };
 
       ws.onmessage = (event) => {
         let data: RealtimeScribeMessage;
-
         try {
           data = JSON.parse(String(event.data)) as RealtimeScribeMessage;
-        } catch {
-          setError('ElevenLabs WebSocket에서 해석할 수 없는 응답을 받았습니다.');
-          return;
-        }
+        } catch { return; }
 
         if (data.message_type === 'partial_transcript') {
           setPartialTranscript(data.text?.trim() ?? '');
           return;
         }
 
-        if (
-          data.message_type === 'committed_transcript' ||
-          data.message_type === 'committed_transcript_with_timestamps'
-        ) {
+        if (data.message_type === 'committed_transcript' || data.message_type === 'committed_transcript_with_timestamps') {
           const text = data.text?.trim();
           if (!text) return;
 
           setSegments((prev) => [
             ...prev,
-            {
-              id: `live-${Date.now()}-${prev.length}`,
-              time: formatNowTime(),
-              text,
-            },
+            { id: `live-${Date.now()}-${prev.length}`, time: formatNowTime(), text },
           ]);
           setPartialTranscript('');
+          void syncTranscriptToBackend(text);
           return;
         }
 
         if (data.message_type?.includes('error')) {
-          setError(data.error || 'ElevenLabs realtime transcription error');
+          setError(data.error || 'ElevenLabs error');
         }
       };
 
-      ws.onerror = () => {
-        setError('ElevenLabs WebSocket 연결에 실패했습니다. 네트워크, 계정 권한, 또는 브라우저 마이크 권한을 확인하세요.');
-      };
-
-      ws.onclose = (event) => {
-        cleanupAudio();
-        wsRef.current = null;
-        setConnectionState('standby');
-
-        if (!event.wasClean && event.code !== 1000) {
-          setError(`ElevenLabs WebSocket 연결이 종료되었습니다. code=${event.code}${event.reason ? `, reason=${event.reason}` : ''}`);
-        }
-      };
+      ws.onerror = () => { setError('ElevenLabs WebSocket failed'); };
+      ws.onclose = () => { cleanupAudio(); wsRef.current = null; setConnectionState('standby'); };
     } catch (err) {
       cleanupAudio();
       wsRef.current?.close();
       wsRef.current = null;
       setConnectionState('standby');
-      setError(err instanceof Error ? err.message : 'Failed to start realtime dictation');
+      setError(err instanceof Error ? err.message : 'Failed to start');
     }
-  }, [cleanupAudio, connectionState]);
+  }, [cleanupAudio, connectionState, currentLectureId]);
 
-  const clearTranscript = () => {
-    setSegments([]);
-    setError(null);
-  };
-
-  const handleEnd = () => {
-    stop();
-    onEnd?.();
-  };
+  const clearTranscript = () => { setSegments([]); setError(null); };
 
   useEffect(() => {
     if (!isRecording) return;
-
     const startedAt = Date.now() - elapsedSeconds * 1000;
     const intervalId = window.setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
-
     return () => window.clearInterval(intervalId);
   }, [elapsedSeconds, isRecording]);
 
   useEffect(() => {
-    return () => {
-      stop();
+    const checkRecovery = async () => {
+       try {
+         // Generic check for any unfinished chunks (could be improved to iterate all)
+         const keys = await localforage.keys();
+         const recoveryKey = keys.find(k => k.startsWith('lecture_') && k.endsWith('_chunks'));
+         if (recoveryKey) {
+            setShowRecoveryModal(true);
+         }
+       } catch(err) {}
     };
-  }, [stop]);
+    void checkRecovery();
+    return () => { if (wsRef.current?.readyState === WebSocket.OPEN) handlePause(); };
+  }, [handlePause]);
+
+  const handleRecover = async () => {
+    setIsRecovering(true);
+    try {
+      const keys = await localforage.keys();
+      const recoveryKey = keys.find(k => k.startsWith('lecture_') && k.endsWith('_chunks'));
+      if (recoveryKey) {
+        const lectureIdFromKey = parseInt(recoveryKey.split('_')[1]);
+        const savedChunks = await localforage.getItem<Blob[]>(recoveryKey);
+        if (savedChunks && savedChunks.length > 0) {
+          const audioBlob = new Blob(savedChunks, { type: 'audio/webm' });
+          const formData = new FormData();
+          formData.append('chunk', audioBlob, `recovery_${Date.now()}.webm`);
+          await apiFetch(`/api/v1/records/${lectureIdFromKey}/chunk`, { method: 'POST', body: formData });
+          await localforage.removeItem(recoveryKey);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      setError('복구 실패');
+    } finally {
+      setIsRecovering(false);
+      setShowRecoveryModal(false);
+    }
+  };
+
+  const handleDiscardRecovery = async () => {
+    const keys = await localforage.keys();
+    for (const key of keys) {
+      if (key.startsWith('lecture_') && key.endsWith('_chunks')) {
+        await localforage.removeItem(key);
+      }
+    }
+    setShowRecoveryModal(false);
+  };
+
   return (
     <section className="relative flex h-[calc(100vh-5rem)] min-h-[720px] overflow-hidden bg-[#f7f9fb] text-[#191c1e]">
+      {/* Recovery Modal */}
+      {showRecoveryModal && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+          <div className="w-[400px] rounded-3xl bg-white p-8 shadow-2xl">
+            <div className="mb-6 flex h-12 w-12 items-center justify-center rounded-full bg-[#ffdad6]">
+              <Trash2 className="h-6 w-6 text-[#93000a]" />
+            </div>
+            <h3 className="mb-2 text-xl font-black text-[#091426]">비정상 종료 감지</h3>
+            <p className="mb-8 text-sm leading-relaxed text-[#45474c]">이전에 저장되지 못한 녹음 파일이 있습니다. 복구하시겠습니까?</p>
+            <div className="flex gap-3">
+              <button onClick={handleDiscardRecovery} disabled={isRecovering} className="flex-1 rounded-xl bg-[#f2f4f6] py-3 text-sm font-bold text-[#45474c]">삭제하기</button>
+              <button onClick={handleRecover} disabled={isRecovering} className="flex-1 rounded-xl bg-[#006b5f] py-3 text-sm font-bold text-white">{isRecovering ? '복구 중...' : '복구하기'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Lecture Creation Modal */}
+      {showCreateModal && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/80 backdrop-blur-md">
+          <form onSubmit={handleCreateLecture} className="w-[480px] rounded-[40px] border border-[#e0e3e5] bg-white p-12 shadow-[0_32px_120px_-40px_rgba(9,20,38,0.3)]">
+            <div className="mb-8 flex h-16 w-12 items-center justify-center rounded-2xl bg-[#f2f4f6]">
+              <BookOpen className="h-8 w-8 text-[#091426]" />
+            </div>
+            <h2 className="mb-2 text-3xl font-black tracking-tight text-[#091426]">새 강의 시작하기</h2>
+            <p className="mb-10 text-sm font-medium text-[#75777d]">진행할 강의의 제목을 입력해주세요. 제목은 나중에 수정할 수 있습니다.</p>
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <label htmlFor="title" className="ml-1 text-xs font-black uppercase tracking-widest text-[#75777d]">Lecture Title</label>
+                <input
+                  id="title"
+                  type="text"
+                  required
+                  value={lectureTitle}
+                  onChange={(e) => setLectureTitle(e.target.value)}
+                  placeholder="예: 객체지향프로그래밍 1주차"
+                  className="w-full rounded-2xl border border-[#c5c6cd] bg-white px-6 py-4 text-lg font-bold outline-none transition focus:border-[#006b5f] focus:ring-4 focus:ring-[#006b5f]/10"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={isCreating}
+                className="w-full rounded-2xl bg-[#091426] py-5 text-lg font-black text-white shadow-xl transition hover:bg-[#1c2a4d] disabled:opacity-50"
+              >
+                {isCreating ? '강의 생성 중...' : '강의 시작'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex h-20 shrink-0 items-center justify-between border-b border-[#e0e3e5]/60 bg-white/70 px-8 backdrop-blur-xl">
           <div>
             <p className="text-xs font-black uppercase tracking-[0.24em] text-[#75777d]">Live lecture</p>
-            <h2 className="mt-1 text-2xl font-black tracking-tight text-[#091426]">고급 기계학습론 - 5주차</h2>
+            <h2 className="mt-1 text-2xl font-black tracking-tight text-[#091426]">
+              {lectureTitle || '강의 대기 중'} {currentLectureId ? `- ${currentLectureId}번 세션` : ''}
+            </h2>
           </div>
-
           <div className="flex items-center gap-3">
-            {error && (
-              <span className="max-w-[360px] truncate rounded-full border border-[#ba1a1a]/20 bg-[#ffdad6] px-3 py-2 text-xs font-bold text-[#93000a]" title={error}>
-                {error}
-              </span>
-            )}
+            {error && <span className="rounded-full border border-[#ba1a1a]/20 bg-[#ffdad6] px-3 py-2 text-xs font-bold text-[#93000a]">{error}</span>}
             <div className="flex items-center gap-2 rounded-full border border-[#c5c6cd]/40 bg-white/90 px-4 py-2 shadow-sm">
               <div className="mr-2 flex h-6 w-9 items-center justify-center gap-[3px]">
-                {[40, 70, 100, 70, 40].map((height, index) => (
-                  <span
-                    key={`recording-bar-${height}-${index}`}
-                    className={isRecording ? 'edupulse-gemini-bar w-1 rounded-full bg-[#ba1a1a]' : `w-1 rounded-full ${isConnecting ? 'bg-[#006b5f]' : 'bg-[#75777d]'}`}
-                    style={{ height: `${height}%`, animationDelay: `${-0.4 + index * 0.1}s` }}
-                  />
+                {[40, 70, 100, 70, 40].map((h, i) => (
+                  <span key={i} className={isRecording ? 'edupulse-gemini-bar w-1 rounded-full bg-[#ba1a1a]' : 'w-1 rounded-full bg-[#75777d]'} style={{ height: `${h}%`, animationDelay: `${-0.4 + i * 0.1}s` }} />
                 ))}
               </div>
-              <span className={`text-xs font-black uppercase tracking-[0.18em] ${isRecording ? 'text-[#ba1a1a]' : 'text-[#75777d]'}`}>
-                {isRecording ? 'Recording' : isConnecting ? 'Connecting' : 'Standby'}
-              </span>
+              <span className={`text-xs font-black uppercase tracking-[0.18em] ${isRecording ? 'text-[#ba1a1a]' : 'text-[#75777d]'}`}>{isRecording ? 'Recording' : isConnecting ? 'Connecting' : 'Standby'}</span>
               <span className="ml-2 text-sm font-bold text-[#45474c]">{recordingTime}</span>
             </div>
           </div>
@@ -391,15 +609,9 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
                 <h3 className="text-lg font-black text-[#091426]">실시간 전사</h3>
               </div>
               <div className="flex items-center gap-2 text-[#45474c]">
-                <button className="rounded-xl p-2 transition hover:bg-[#eceef0]" aria-label="전사 검색">
-                  <Search className="h-5 w-5" />
-                </button>
-                <button className="rounded-xl p-2 transition hover:bg-[#eceef0]" aria-label="전사 다운로드">
-                  <Download className="h-5 w-5" />
-                </button>
-                <button onClick={clearTranscript} className="rounded-xl p-2 transition hover:bg-[#eceef0]" aria-label="전사 지우기">
-                  <Trash2 className="h-5 w-5" />
-                </button>
+                <button className="rounded-xl p-2 transition hover:bg-[#eceef0]"><Search className="h-5 w-5" /></button>
+                <button className="rounded-xl p-2 transition hover:bg-[#eceef0]"><Download className="h-5 w-5" /></button>
+                <button onClick={clearTranscript} className="rounded-xl p-2 transition hover:bg-[#eceef0]"><Trash2 className="h-5 w-5" /></button>
               </div>
             </div>
 
@@ -407,28 +619,21 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
               {segments.length === 0 && !partialTranscript && (
                 <div className="flex h-full min-h-[260px] flex-col items-center justify-center rounded-3xl border border-dashed border-[#c5c6cd] bg-[#f7f9fb] px-8 text-center">
                   <Mic className="mb-4 h-10 w-10 text-[#75777d]" />
-                  <p className="text-lg font-black text-[#091426]">마이크 전사를 시작하세요</p>
-                  <p className="mt-2 text-sm font-medium text-[#75777d]">하단 마이크 버튼을 누르고 브라우저 마이크 권한을 허용하면 ElevenLabs Scribe WebSocket으로 실시간 전사가 표시됩니다.</p>
+                  <p className="text-lg font-black text-[#091426]">강의를 시작하면 전사가 표시됩니다</p>
                 </div>
               )}
-
               {segments.map((item) => (
                 <div key={item.id} className="group flex gap-8">
-                  <div className="w-14 shrink-0 pt-1.5">
-                    <span className="text-xs font-black tracking-wider text-[#75777d]">{item.time}</span>
-                  </div>
+                  <div className="w-14 shrink-0 pt-1.5"><span className="text-xs font-black tracking-wider text-[#75777d]">{item.time}</span></div>
                   <p className="max-w-5xl text-[18px] leading-[1.75] text-[#191c1e] lg:text-[19px]">{item.text}</p>
                 </div>
               ))}
-
               <div className="relative py-4">
                 <div className="absolute bottom-0 left-[-10px] top-0 w-1 rounded-full bg-[#006b5f]" />
                 <div className="flex gap-8">
-                  <div className="w-14 shrink-0 pt-1.5">
-                    <span className="text-xs font-black tracking-wider text-[#006b5f]">LIVE</span>
-                  </div>
+                  <div className="w-14 shrink-0 pt-1.5"><span className="text-xs font-black tracking-wider text-[#006b5f]">LIVE</span></div>
                   <p className="text-[19px] italic leading-[1.75] text-[#191c1e]/80">
-                    {partialTranscript || (isRecording ? '말씀하시면 여기에 실시간으로 표시됩니다' : isConnecting ? 'ElevenLabs WebSocket에 연결하는 중입니다...' : '하단 마이크 버튼을 눌러 ElevenLabs 실시간 전사를 시작하세요')}
+                    {partialTranscript || (isRecording ? '말씀하시면 표시됩니다' : '마이크 대기 중...')}
                     <span className="ml-1 inline-block h-[1.1em] w-[3px] animate-pulse bg-[#006b5f] align-middle" />
                   </p>
                 </div>
@@ -436,94 +641,23 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
             </div>
           </article>
 
-          {/* AI 질의응답은 요청대로 목업 상태 유지 */}
-          <aside className="hidden w-[400px] shrink-0 flex-col overflow-hidden rounded-3xl border border-[#e0e3e5]/80 bg-white shadow-[0_24px_80px_-56px_rgba(9,20,38,0.65)] xl:flex 2xl:w-[440px]">
+          <aside className="hidden w-[400px] shrink-0 flex-col overflow-hidden rounded-3xl border border-[#e0e3e5]/80 bg-white shadow-2xl xl:flex 2xl:w-[440px]">
             <div className="flex items-center justify-between border-b border-[#e0e3e5]/70 bg-[#f2f4f6] px-6 py-5">
               <div className="flex items-center gap-3">
-                <Sparkles className="h-6 w-6 fill-[#006b5f]/20 text-[#006b5f]" />
+                <Sparkles className="h-6 w-6 text-[#006b5f]" />
                 <h3 className="text-lg font-black text-[#091426]">AI 질의응답</h3>
               </div>
-              <button className="rounded-xl p-2 text-[#45474c] transition hover:bg-[#eceef0]" aria-label="AI 패널 확대">
-                <Maximize2 className="h-5 w-5" />
-              </button>
             </div>
-
-            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-6">
-              <div className="flex justify-center">
-                <span className="rounded-full bg-[#eceef0] px-4 py-1.5 text-[11px] font-black uppercase tracking-[0.18em] text-[#75777d]">
-                  Context analyzed
-                </span>
-              </div>
-
-              <div className="flex justify-end">
-                <div className="max-w-[85%] rounded-2xl rounded-tr-none bg-[#091426] px-5 py-3.5 text-sm leading-relaxed text-white shadow-sm">
-                  교수님이 방금 말씀하신 베타1과 베타2의 차이가 정확히 뭐야?
-                </div>
-              </div>
-
-              <div className="flex items-start gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#62fae3] shadow-sm">
-                  <Bot className="h-5 w-5 text-[#00201c]" />
-                </div>
-                <div className="max-w-[85%] rounded-2xl rounded-tl-none border border-[#c5c6cd]/30 bg-[#f2f4f6] px-5 py-4 text-sm leading-relaxed text-[#191c1e] shadow-sm">
-                  <p className="mb-3 font-bold">Adam 옵티마이저의 핵심 파라미터입니다:</p>
-                  <ul className="space-y-3">
-                    <li className="flex gap-2">
-                      <span className="shrink-0 font-black text-[#006b5f]">•</span>
-                      <span><strong className="text-[#091426]">β1 (0.9):</strong> 모멘텀 제어. 이전 그래디언트의 방향성을 유지합니다.</span>
-                    </li>
-                    <li className="flex gap-2">
-                      <span className="shrink-0 font-black text-[#006b5f]">•</span>
-                      <span><strong className="text-[#091426]">β2 (0.999):</strong> RMSprop 역할. 학습률 크기를 이동 평균으로 조정합니다.</span>
-                    </li>
-                  </ul>
-                  <div className="mt-4 flex flex-wrap gap-2 border-t border-[#c5c6cd]/30 pt-4">
-                    <button className="rounded-full border border-[#006b5f]/20 px-3 py-1.5 text-xs font-black text-[#006b5f] transition hover:bg-[#006b5f]/5">
-                      수식으로 보기
-                    </button>
-                    <button className="rounded-full border border-[#006b5f]/20 px-3 py-1.5 text-xs font-black text-[#006b5f] transition hover:bg-[#006b5f]/5">
-                      실무 예시
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="border-t border-[#e0e3e5]/70 bg-white p-6">
-              <div className="relative flex items-center">
-                <input
-                  className="w-full rounded-2xl border border-[#c5c6cd]/60 bg-white py-4 pl-5 pr-14 text-sm text-[#191c1e] outline-none transition placeholder:text-[#75777d] focus:border-[#006b5f] focus:ring-4 focus:ring-[#006b5f]/10"
-                  placeholder="강의 내용에 대해 질문하세요..."
-                  type="text"
-                />
-                <button className="absolute right-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[#091426] text-white shadow-sm transition hover:bg-[#091426]/90" aria-label="질문 전송">
-                  <ArrowUp className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
+            <div className="flex-1 p-6 text-center text-sm text-[#75777d]">강의가 시작되면 AI 튜터와 대화할 수 있습니다.</div>
           </aside>
         </div>
 
-        <div className="absolute bottom-6 left-1/2 z-30 flex -translate-x-1/2 flex-col items-center gap-2">
-          <div className="flex items-center gap-4 rounded-full border border-white/10 bg-slate-950/90 px-6 py-2 shadow-2xl backdrop-blur-2xl">
-            <button
-              onClick={handleEnd}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-[#ba1a1a] text-white shadow-sm transition hover:bg-[#a01515]"
-              aria-label="강의 종료"
-            >
-              <PhoneOff className="h-5 w-5" />
-            </button>
-            <button onClick={stop} disabled={!isRecording} className="flex h-10 w-10 items-center justify-center rounded-full text-slate-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" aria-label="일시 정지">
-              <PauseCircle className="h-6 w-6" />
-            </button>
-            <button onClick={isRecording ? stop : start} disabled={isConnecting} className="flex h-10 w-10 items-center justify-center rounded-full text-slate-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40" aria-label={isRecording ? '마이크 끄기' : '마이크 켜기'}>
-              {isRecording ? <MicOff className="h-6 w-6" /> : <Play className="h-6 w-6" />}
-            </button>
-            <button className="flex h-10 w-10 items-center justify-center rounded-full text-slate-300 transition hover:bg-white/10 hover:text-white" aria-label="음성 설정">
-              <Settings2 className="h-6 w-6" />
-            </button>
-          </div>
-          <div className="h-1 w-12 rounded-full bg-[#191c1e]/20" />
+        <div className="absolute bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-4 rounded-full border border-white/10 bg-slate-950/90 px-6 py-2 shadow-2xl backdrop-blur-2xl">
+          <button onClick={handleEnd} className="flex h-10 w-10 items-center justify-center rounded-full bg-[#ba1a1a] text-white transition hover:bg-[#a01515]"><PhoneOff className="h-5 w-5" /></button>
+          <button onClick={handlePause} disabled={!isRecording} className="flex h-10 w-10 items-center justify-center rounded-full text-slate-300 transition hover:bg-white/10 disabled:opacity-40"><PauseCircle className="h-6 w-6" /></button>
+          <button onClick={isRecording ? handlePause : start} disabled={isConnecting || !currentLectureId} className="flex h-10 w-10 items-center justify-center rounded-full text-slate-300 transition hover:bg-white/10 disabled:opacity-40">
+            {isRecording ? <MicOff className="h-6 w-6" /> : <Play className="h-6 w-6" />}
+          </button>
         </div>
       </main>
     </section>

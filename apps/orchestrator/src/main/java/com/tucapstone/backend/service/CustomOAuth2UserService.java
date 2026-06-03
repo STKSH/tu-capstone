@@ -3,6 +3,7 @@ package com.tucapstone.backend.service;
 import com.tucapstone.backend.security.PrincipalUser;
 import com.tucapstone.backend.dto.response.UserResponse;
 import com.tucapstone.backend.entity.User;
+import com.tucapstone.backend.entity.UserStatus;
 import com.tucapstone.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.oauth2.client.userinfo.DefaultOAuth2UserService;
@@ -58,6 +59,12 @@ public class CustomOAuth2UserService implements OAuth2UserService<OAuth2UserRequ
                     entity.setPicture(picture);
                     entity.setProvider(provider);
                     entity.setProviderId(providerId);
+                    
+                    // Reactivate if the user was withdrawn
+                    if (entity.getStatus() == UserStatus.WITHDRAWN) {
+                        entity.setStatus(UserStatus.ACTIVE);
+                    }
+                    
                     return userRepository.save(entity);
                 })
                 .orElseGet(() -> {

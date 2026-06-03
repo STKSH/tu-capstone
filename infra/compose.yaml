@@ -18,12 +18,14 @@ services:
     volumes:
       - ..:/workspace
       - web_node_modules:/workspace/apps/web/node_modules
+    networks:
+      - default_network
 
   orchestrator:
     image: eclipse-temurin:17-jdk
     working_dir: /workspace/apps/orchestrator
     command: >-
-      sh -lc "chmod +x ./gradlew && ./gradlew bootRun --args='--server.port=8080'"
+      sh -lc "apt-get update && apt-get install -y ffmpeg procps && chmod +x ./gradlew && ./gradlew bootRun --args='--server.port=8080'"
     ports:
       - "${ORCHESTRATOR_PORT:-8080}:8080"
     environment:
@@ -33,13 +35,18 @@ services:
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET}"
       ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY}"
+      MINIO_ENDPOINT: "http://minio:9000"
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_started
     profiles: ["core", "full"]
     volumes:
       - ..:/workspace
       - gradle_cache:/root/.gradle
+    networks:
+      - default_network
 
   postgres:
     image: postgres:16-alpine
@@ -57,6 +64,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - default_network
 
   agent-worker:
     image: python:3.11-slim
@@ -72,6 +81,8 @@ services:
     volumes:
       - ..:/workspace
       - pip_cache:/root/.cache/pip
+    networks:
+      - default_network
 
   minio:
     image: quay.io/minio/minio:latest
@@ -90,6 +101,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - default_network
 
   redis:
     image: redis:7-alpine
@@ -101,6 +114,12 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    networks:
+      - default_network
+
+networks:
+  default_network:
+    driver: bridge
 
 volumes:
   web_node_modules:
