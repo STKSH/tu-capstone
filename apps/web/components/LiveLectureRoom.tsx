@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 
 type LiveLectureRoomProps = {
+  lectureId: number;
   onEnd?: () => void;
 };
 
@@ -110,7 +111,7 @@ function formatNowTime() {
   }).format(new Date());
 }
 
-export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
+export default function LiveLectureRoom({ lectureId, onEnd }: LiveLectureRoomProps) {
   const [segments, setSegments] = useState<TranscriptSegment[]>(initialTranscripts);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [partialTranscript, setPartialTranscript] = useState('');
@@ -171,7 +172,7 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
     setConnectionState('connecting');
 
     try {
-      const tokenEndpoint = `${API_CONFIG.BASE_URL}/api/scribe/token`;
+      const tokenEndpoint = `${API_CONFIG.BASE_URL}/api/lectures/${lectureId}/scribe-token`;
       const tokenResponse = await fetch(tokenEndpoint, {
         method: 'POST',
         credentials: 'include',
@@ -198,7 +199,6 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
       console.log('[ElevenLabs] Spring token auth success', {
         endpoint: tokenEndpoint,
         status: tokenResponse.status,
-        tokenPrefix: tokenData.token.slice(0, 8),
       });
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -322,7 +322,7 @@ export default function LiveLectureRoom({ onEnd }: LiveLectureRoomProps) {
       setConnectionState('standby');
       setError(err instanceof Error ? err.message : 'Failed to start realtime dictation');
     }
-  }, [cleanupAudio, connectionState]);
+  }, [cleanupAudio, connectionState, lectureId]);
 
   const clearTranscript = () => {
     setSegments([]);

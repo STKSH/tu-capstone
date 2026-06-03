@@ -7,8 +7,10 @@ import com.tucapstone.backend.entity.User;
 import com.tucapstone.backend.repository.LectureRepository;
 import com.tucapstone.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -53,5 +55,15 @@ public class LectureService {
                 .title(l.getTitle())
                 .createdAt(l.getCreatedAt())
                 .build()).collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public void validateLectureOwner(String email, Long lectureId) {
+        Lecture lecture = lectureRepository.findById(lectureId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Lecture not found"));
+
+        if (!lecture.getUser().getEmail().equals(email)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Lecture does not belong to current user");
+        }
     }
 }
