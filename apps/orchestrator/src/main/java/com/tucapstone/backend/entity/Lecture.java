@@ -36,6 +36,15 @@ public class Lecture {
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status")
+    @Builder.Default
+    private LectureStatus status = LectureStatus.RECORDING;
+
     @OneToOne(mappedBy = "lecture", cascade = CascadeType.ALL, orphanRemoval = true)
     private Record record;
+
+    @Builder.Default
+    @OneToMany(mappedBy = "lecture", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Message> messages = new ArrayList<>();
 }

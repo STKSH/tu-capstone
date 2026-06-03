@@ -49,3 +49,9 @@ jwt:
 
 elevenlabs:
   api-key: ${ELEVENLABS_API_KEY:}
+
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin}
+  bucket: ${MINIO_BUCKET:tucapstone}

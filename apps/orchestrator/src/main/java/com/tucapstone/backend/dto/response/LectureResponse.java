@@ -12,5 +12,7 @@ public class LectureResponse {
     private Long id;
     private Long userId;
     private String title;
+    private String status;
+    private String transcript;
     private LocalDateTime createdAt;
 }

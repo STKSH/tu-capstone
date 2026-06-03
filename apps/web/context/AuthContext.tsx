@@ -1,6 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { usePathname } from 'next/navigation';
 import { User, TokenResponse, AuthState } from '../types/auth';
 import { apiFetch } from '../lib/api';
 import { ENDPOINTS } from '../lib/endpoints';
@@ -8,12 +9,14 @@ import { ENDPOINTS } from '../lib/endpoints';
 interface AuthContextType extends AuthState {
   login: (email: string) => Promise<void>;
   logout: () => Promise<void>;
+  withdraw: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const [state, setState] = useState<AuthState>({
     user: null,
     isAuthenticated: false,
@@ -39,11 +42,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // 쿠키 기반 인증이므로 무조건 서버에 내 정보를 확인하여 세션 유지 판단
-    queueMicrotask(() => {
-      void refreshUser();
-    });
-  }, [refreshUser]);
+    // Prevent infinite loop if already on login page
+    if (pathname === '/login') {
+      setState(prev => ({ ...prev, isLoading: false }));
+      return;
+    }
+
+    void refreshUser();
+  }, [refreshUser, pathname]);
 
   const login = useCallback(async (email: string) => {
     try {
@@ -72,8 +78,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const withdraw = useCallback(async () => {
+    try {
+      await apiFetch(ENDPOINTS.AUTH.WITHDRAW, { method: 'POST' });
+    } catch (error) {
+      console.error('Withdraw failed:', error);
+      throw error;
+    } finally {
+      setState({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+      });
+    }
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refreshUser }}>
+    <AuthContext.Provider value={{ ...state, login, logout, withdraw, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

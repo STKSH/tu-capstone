@@ -38,6 +38,11 @@ public class User {
     @Column(length = 50)
     private String role;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status")
+    @Builder.Default
+    private UserStatus status = UserStatus.ACTIVE;
+
     @CreatedDate
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

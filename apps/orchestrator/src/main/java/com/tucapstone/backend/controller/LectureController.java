@@ -38,13 +38,13 @@ public class LectureController {
 
     @Operation(summary = "강의 상세 조회", description = "특정 강의의 상세 정보와 S3 경로를 조회합니다.")
     @GetMapping("/{lectureId}")
-    public ResponseEntity<?> getLectureDetail(@PathVariable Long lectureId) {
-        return ResponseEntity.ok().build();
+    public ResponseEntity<LectureResponse> getLectureDetail(@PathVariable Long lectureId) {
+        return ResponseEntity.ok(lectureService.getLectureDetail(lectureId));
     }
 
     @Operation(summary = "강의 삭제", description = "강의 기록을 삭제합니다.")
     @DeleteMapping("/{lectureId}")
     public ResponseEntity<Void> deleteLecture(@PathVariable Long lectureId) {
-        return ResponseEntity.ok().build();
+        return ResponseEntity.noContent().build();
     }
 }

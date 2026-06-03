@@ -36,6 +36,7 @@ public class LectureService {
                 .id(savedLecture.getId())
                 .userId(savedLecture.getUser().getId())
                 .title(savedLecture.getTitle())
+                .status(savedLecture.getStatus().name())
                 .createdAt(savedLecture.getCreatedAt())
                 .build();
     }
@@ -46,12 +47,30 @@ public class LectureService {
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
         List<Lecture> lectures = lectureRepository.findByUserIdOrderByCreatedAtDesc(user.getId());
-        
+
         return lectures.stream().map(l -> LectureResponse.builder()
                 .id(l.getId())
                 .userId(l.getUser().getId())
                 .title(l.getTitle())
+                .status(l.getStatus().name())
                 .createdAt(l.getCreatedAt())
                 .build()).collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public LectureResponse getLectureDetail(Long lectureId) {
+        Lecture lecture = lectureRepository.findById(lectureId)
+                .orElseThrow(() -> new RuntimeException("Lecture not found with ID: " + lectureId));
+
+        String transcript = (lecture.getRecord() != null) ? lecture.getRecord().getTranscript() : null;
+
+        return LectureResponse.builder()
+                .id(lecture.getId())
+                .userId(lecture.getUser().getId())
+                .title(lecture.getTitle())
+                .status(lecture.getStatus().name())
+                .transcript(transcript)
+                .createdAt(lecture.getCreatedAt())
+                .build();
     }
 }

@@ -40,7 +40,28 @@ public class AuthController {
                 .maxAge(0)
                 .build();
 
-        return ResponseEntity.ok()
+        return ResponseEntity.noContent()
+                .header(org.springframework.http.HttpHeaders.SET_COOKIE, accessCookie.toString())
+                .header(org.springframework.http.HttpHeaders.SET_COOKIE, refreshCookie.toString())
+                .build();
+    }
+
+    @Operation(summary = "회원 탈퇴", description = "현재 사용자의 계정을 비활성화(Soft Delete)하고 세션을 종료합니다.")
+    @PostMapping("/withdraw")
+    public ResponseEntity<Void> withdraw(@AuthenticationPrincipal UserDetails userDetails) {
+        authService.withdraw(userDetails.getUsername());
+
+        org.springframework.http.ResponseCookie accessCookie = org.springframework.http.ResponseCookie.from("accessToken", "")
+                .path("/")
+                .maxAge(0)
+                .build();
+
+        org.springframework.http.ResponseCookie refreshCookie = org.springframework.http.ResponseCookie.from("refreshToken", "")
+                .path("/")
+                .maxAge(0)
+                .build();
+
+        return ResponseEntity.noContent()
                 .header(org.springframework.http.HttpHeaders.SET_COOKIE, accessCookie.toString())
                 .header(org.springframework.http.HttpHeaders.SET_COOKIE, refreshCookie.toString())
                 .build();
