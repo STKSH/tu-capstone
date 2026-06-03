@@ -31,10 +31,12 @@ export default function ProtectedLayout({
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [isAccountActionPending, setIsAccountActionPending] = useState(false);
+  const [accountActionError, setAccountActionError] = useState<string | null>(null);
 
   const displayName = user?.name || user?.email || "사용자";
 
   const handleLogout = async () => {
+    setAccountActionError(null);
     setIsAccountActionPending(true);
     try {
       await logout();
@@ -46,14 +48,18 @@ export default function ProtectedLayout({
   };
 
   const handleWithdrawAccount = async () => {
+    setAccountActionError(null);
     setIsAccountActionPending(true);
     try {
       await withdrawAccount();
-      router.push("/login");
-    } finally {
-      setIsAccountActionPending(false);
       setIsAccountMenuOpen(false);
       setIsDeleteConfirmOpen(false);
+      router.push("/login");
+    } catch (error) {
+      console.error(error);
+      setAccountActionError("계정 탈퇴 중 오류가 발생했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsAccountActionPending(false);
     }
   };
 
@@ -164,6 +170,7 @@ export default function ProtectedLayout({
                 onClick={() => {
                   setIsAccountMenuOpen((open) => !open);
                   setIsDeleteConfirmOpen(false);
+                  setAccountActionError(null);
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#61efce]/30"
                 aria-label="사용자 메뉴 열기"
@@ -187,6 +194,7 @@ export default function ProtectedLayout({
                       onClick={() => {
                         setIsAccountMenuOpen(false);
                         setIsDeleteConfirmOpen(false);
+                        setAccountActionError(null);
                       }}
                       className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-900"
                       aria-label="사용자 메뉴 닫기"
@@ -196,6 +204,12 @@ export default function ProtectedLayout({
                   </div>
 
                   <div className="space-y-1 py-2">
+                    {accountActionError && (
+                      <p className="rounded-xl border border-[#ffb4ab] bg-[#fff7f6] px-3 py-2 text-xs font-bold leading-5 text-[#93000a]">
+                        {accountActionError}
+                      </p>
+                    )}
+
                     <button
                       type="button"
                       onClick={handleLogout}
@@ -209,7 +223,10 @@ export default function ProtectedLayout({
                     {!isDeleteConfirmOpen ? (
                       <button
                         type="button"
-                        onClick={() => setIsDeleteConfirmOpen(true)}
+                        onClick={() => {
+                          setIsDeleteConfirmOpen(true);
+                          setAccountActionError(null);
+                        }}
                         disabled={isAccountActionPending}
                         className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/55 disabled:cursor-not-allowed disabled:opacity-50"
                       >

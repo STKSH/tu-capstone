@@ -88,7 +88,7 @@ public class AuthController {
                 .body(tokenResponse);
     }
 
-    private ResponseEntity.BodyBuilder clearAuthCookies(ResponseEntity.BodyBuilder responseBuilder) {
+    private ResponseEntity.HeadersBuilder<?> clearAuthCookies(ResponseEntity.HeadersBuilder<?> responseBuilder) {
         ResponseCookie accessCookie = ResponseCookie.from("accessToken", "")
                 .path("/")
                 .maxAge(0)

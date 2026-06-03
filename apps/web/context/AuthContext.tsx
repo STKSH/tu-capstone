@@ -76,12 +76,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const withdrawAccount = useCallback(async () => {
     try {
       await apiFetch(ENDPOINTS.AUTH.DELETE_ACCOUNT, { method: 'DELETE' });
-    } finally {
       setState({
         user: null,
         isAuthenticated: false,
         isLoading: false,
       });
+    } catch (error) {
+      console.error('Failed to withdraw account:', error);
+      throw error;
     }
   }, []);
 
