@@ -356,8 +356,8 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
         }
       }
 
-      if (!tokenResponse.ok) {
-        throw new Error(tokenData.error || tokenData.message || 'ElevenLabs token failed');
+      if (!tokenResponse.ok || !tokenData.token) {
+        throw new Error(tokenData.error || tokenData.message || 'ElevenLabs token missing or invalid');
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({

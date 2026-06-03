@@ -50,14 +50,22 @@ public class FFmpegService {
         processBuilder.redirectErrorStream(true);
         Process process = processBuilder.start();
 
+        // Read output to prevent deadlock
+        String output;
+        try (var inputStream = process.getInputStream()) {
+            output = new String(inputStream.readAllBytes());
+        }
+
         int exitCode = process.waitFor();
 
         // Cleanup the list file
         Files.deleteIfExists(listFilePath);
 
         if (exitCode != 0) {
-            String output = new String(process.getInputStream().readAllBytes());
             log.error("FFmpeg merge failed with exit code {}. Output:\n{}", exitCode, output);
+            if (outputFile.exists()) {
+                outputFile.delete();
+            }
             throw new RuntimeException("Failed to merge audio chunks using FFmpeg.");
         }
 
