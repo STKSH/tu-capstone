@@ -21,6 +21,10 @@ export const ENDPOINTS = {
   },
   RECORD: {
     COMPLETE: '/api/internal/record/complete',
+  },
+  CHAT: {
+    LIVE: '/api/chat/live',
+    LIVE_STREAM: '/api/chat/live/stream',
   }
 } as const;
 

@@ -1,5 +1,6 @@
 package com.tucapstone.backend.config;
 
+import jakarta.servlet.DispatcherType;
 import com.tucapstone.backend.service.CustomOAuth2UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
@@ -32,10 +33,11 @@ public class SecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/login/temp", "/api/auth/refresh", "/login/**", "/oauth2/**").permitAll() 
+                .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
+                .requestMatchers("/error", "/api/auth/login/temp", "/api/auth/refresh", "/login/**", "/oauth2/**").permitAll()
                 .requestMatchers("/api/auth/me", "/api/auth/logout").authenticated()
-                .requestMatchers("/swagger-ui/**", "/v3/api-docs/**", "/swagger-ui.html", "/api-docs/**").permitAll() 
-                .anyRequest().authenticated() 
+                .requestMatchers("/swagger-ui/**", "/v3/api-docs/**", "/swagger-ui.html", "/api-docs/**").permitAll()
+                .anyRequest().authenticated()
             )
             .oauth2Login(oauth2 -> oauth2
                 .userInfoEndpoint(userInfo -> userInfo.userService(customOAuth2UserService))

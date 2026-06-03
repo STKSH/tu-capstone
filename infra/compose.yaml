@@ -33,9 +33,14 @@ services:
       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID}"
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET}"
       ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY}"
+      AGENT_WORKER_BASE_URL: "${AGENT_WORKER_BASE_URL:-http://agent-worker:8765}"
+      LIVE_CHAT_WORKER_SECRET: "${LIVE_CHAT_WORKER_SECRET:-local-live-chat-worker-secret}"
     depends_on:
       postgres:
         condition: service_healthy
+      agent-worker:
+        condition: service_started
+        required: false
     profiles: ["core", "full"]
     volumes:
       - ..:/workspace
@@ -64,10 +69,11 @@ services:
     command: >-
       sh -lc "pip install -r requirements.txt && uvicorn server:app --host 0.0.0.0 --port 8765 --reload"
     ports:
-      - "${AGENT_WORKER_PORT:-8765}:8765"
-    depends_on:
-      redis:
-        condition: service_healthy
+      - "127.0.0.1:${AGENT_WORKER_PORT:-8765}:8765"
+    environment:
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-openrouter/free}"
+      LIVE_CHAT_WORKER_SECRET: "${LIVE_CHAT_WORKER_SECRET:-local-live-chat-worker-secret}"
     profiles: ["full"]
     volumes:
       - ..:/workspace
