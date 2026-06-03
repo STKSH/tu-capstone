@@ -10,7 +10,13 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
@@ -32,19 +38,27 @@ public class LectureController {
     @PostMapping
     public ResponseEntity<LectureResponse> createLecture(
             @AuthenticationPrincipal UserDetails userDetails,
-            @RequestBody @Valid LectureCreateRequest request) {
+            @RequestBody @Valid LectureCreateRequest request
+    ) {
         return ResponseEntity.ok(lectureService.createLecture(userDetails.getUsername(), request));
     }
 
-    @Operation(summary = "강의 상세 조회", description = "특정 강의의 상세 정보와 S3 경로를 조회합니다.")
+    @Operation(summary = "강의 상세 조회", description = "현재 사용자가 소유한 강의의 상세 정보를 조회합니다.")
     @GetMapping("/{lectureId}")
-    public ResponseEntity<?> getLectureDetail(@PathVariable Long lectureId) {
-        return ResponseEntity.ok().build();
+    public ResponseEntity<LectureResponse> getLectureDetail(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @PathVariable Long lectureId
+    ) {
+        return ResponseEntity.ok(lectureService.getLectureDetail(userDetails.getUsername(), lectureId));
     }
 
-    @Operation(summary = "강의 삭제", description = "강의 기록을 삭제합니다.")
+    @Operation(summary = "강의 삭제", description = "현재 사용자가 소유한 강의 기록을 삭제합니다.")
     @DeleteMapping("/{lectureId}")
-    public ResponseEntity<Void> deleteLecture(@PathVariable Long lectureId) {
-        return ResponseEntity.ok().build();
+    public ResponseEntity<Void> deleteLecture(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @PathVariable Long lectureId
+    ) {
+        lectureService.deleteLecture(userDetails.getUsername(), lectureId);
+        return ResponseEntity.noContent().build();
     }
 }
