@@ -8,6 +8,7 @@ import { ENDPOINTS } from '../lib/endpoints';
 interface AuthContextType extends AuthState {
   login: (email: string) => Promise<void>;
   logout: () => Promise<void>;
+  withdrawAccount: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
@@ -72,8 +73,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const withdrawAccount = useCallback(async () => {
+    try {
+      await apiFetch(ENDPOINTS.AUTH.DELETE_ACCOUNT, { method: 'DELETE' });
+    } finally {
+      setState({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+      });
+    }
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refreshUser }}>
+    <AuthContext.Provider value={{ ...state, login, logout, withdrawAccount, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

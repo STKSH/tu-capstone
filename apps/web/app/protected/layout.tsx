@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from "react";
 import { useAuth } from "../../context/AuthContext";
 import ProtectedRoute from "../../components/ProtectedRoute";
 import Link from "next/link";
@@ -12,7 +13,10 @@ import {
   PlusCircle,
   Bell,
   Radio,
-  User as UserIcon
+  LogOut,
+  User as UserIcon,
+  UserX,
+  X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -21,9 +25,37 @@ export default function ProtectedLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { logout } = useAuth();
+  const { logout, withdrawAccount, user } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isAccountActionPending, setIsAccountActionPending] = useState(false);
+
+  const displayName = user?.name || user?.email || "사용자";
+
+  const handleLogout = async () => {
+    setIsAccountActionPending(true);
+    try {
+      await logout();
+      router.push("/login");
+    } finally {
+      setIsAccountActionPending(false);
+      setIsAccountMenuOpen(false);
+    }
+  };
+
+  const handleWithdrawAccount = async () => {
+    setIsAccountActionPending(true);
+    try {
+      await withdrawAccount();
+      router.push("/login");
+    } finally {
+      setIsAccountActionPending(false);
+      setIsAccountMenuOpen(false);
+      setIsDeleteConfirmOpen(false);
+    }
+  };
 
   return (
     <ProtectedRoute>
@@ -126,9 +158,94 @@ export default function ProtectedLayout({
               <Bell className="h-5 w-5" />
             </button>
             
-            <button onClick={() => logout()} className="w-8 h-8 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors">
-              <UserIcon className="h-4 w-4" />
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAccountMenuOpen((open) => !open);
+                  setIsDeleteConfirmOpen(false);
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#61efce]/30"
+                aria-label="사용자 메뉴 열기"
+                aria-expanded={isAccountMenuOpen}
+              >
+                <UserIcon className="h-4 w-4" />
+              </button>
+
+              {isAccountMenuOpen && (
+                <div className="absolute right-0 top-12 z-50 w-[320px] rounded-2xl border border-gray-200 bg-white p-3 text-left shadow-[0_24px_70px_-32px_rgba(15,23,42,0.45)]">
+                  <div className="flex items-start justify-between gap-3 border-b border-gray-100 px-2 pb-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-gray-400">계정</p>
+                      <p className="mt-1 truncate text-sm font-extrabold text-gray-950">{displayName}</p>
+                      {user?.email && (
+                        <p className="mt-0.5 truncate text-xs font-medium text-gray-500">{user.email}</p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsAccountMenuOpen(false);
+                        setIsDeleteConfirmOpen(false);
+                      }}
+                      className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                      aria-label="사용자 메뉴 닫기"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-1 py-2">
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      disabled={isAccountActionPending}
+                      className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-gray-700 transition-colors hover:bg-gray-50 hover:text-gray-950 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <LogOut className="h-4 w-4" />
+                      로그아웃
+                    </button>
+
+                    {!isDeleteConfirmOpen ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsDeleteConfirmOpen(true)}
+                        disabled={isAccountActionPending}
+                        className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-[#ba1a1a] transition-colors hover:bg-[#ffdad6]/55 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <UserX className="h-4 w-4" />
+                        계정 탈퇴
+                      </button>
+                    ) : (
+                      <div className="rounded-xl border border-[#ffb4ab] bg-[#fff7f6] p-3">
+                        <p className="text-sm font-extrabold text-[#93000a]">계정을 탈퇴할까요?</p>
+                        <p className="mt-1 text-xs font-medium leading-5 text-[#7a271f]">
+                          계정과 저장된 세션 정보가 삭제됩니다.
+                        </p>
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsDeleteConfirmOpen(false)}
+                            disabled={isAccountActionPending}
+                            className="flex-1 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-extrabold text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            취소
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleWithdrawAccount}
+                            disabled={isAccountActionPending}
+                            className="flex-1 rounded-lg bg-[#ba1a1a] px-3 py-2 text-xs font-extrabold text-white transition-colors hover:bg-[#9f1616] disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            탈퇴하기
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </header>
 
           <div className="flex-1 overflow-y-auto">

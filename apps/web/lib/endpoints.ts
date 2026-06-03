@@ -12,6 +12,7 @@ export const ENDPOINTS = {
     LOGIN_TEMP: '/api/auth/login/temp',
     LOGOUT: '/api/auth/logout',
     REFRESH: '/api/auth/refresh',
+    DELETE_ACCOUNT: '/api/auth/me',
     OAUTH2_GOOGLE: '/oauth2/authorization/google',
   },
   LECTURE: {

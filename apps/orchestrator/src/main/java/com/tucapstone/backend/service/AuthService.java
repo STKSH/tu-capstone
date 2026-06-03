@@ -121,4 +121,13 @@ public class AuthService {
         
         refreshTokenRepository.deleteByUserId(user.getId());
     }
+
+    @Transactional
+    public void deleteAccount(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        refreshTokenRepository.deleteByUserId(user.getId());
+        userRepository.delete(user);
+    }
 }
