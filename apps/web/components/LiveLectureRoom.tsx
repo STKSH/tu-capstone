@@ -1,10 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { API_CONFIG } from '@/lib/endpoints';
+import { API_CONFIG, ENDPOINTS } from '@/lib/endpoints';
 import { apiFetch } from '@/lib/api';
 import localforage from 'localforage';
 import {
+  ArrowUp,
+  Bot,
   Download,
   Mic,
   MicOff,
@@ -41,6 +43,23 @@ type RealtimeScribeMessage = {
   error?: string;
 };
 
+type LiveChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+  grounding?: 'transcript_only' | 'transcript_and_general_knowledge' | 'general_knowledge';
+  model?: string;
+};
+
+type LiveChatStreamPayload = {
+  delta?: string;
+  answer?: string;
+  grounding?: LiveChatMessage['grounding'];
+  model?: string;
+  message?: string;
+};
+
 interface Lecture {
   id: number;
   title: string;
@@ -49,6 +68,7 @@ interface Lecture {
 }
 
 const initialTranscripts: TranscriptSegment[] = [];
+const TRANSCRIPT_CONTEXT_SEGMENT_LIMIT = 20;
 
 
 function downsampleToPcm16(input: Float32Array, inputSampleRate: number, outputSampleRate: number) {
@@ -131,6 +151,10 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
   const [lectureTitle, setLectureTitle] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(!resumeId);
   const [isCreating, setIsCreating] = useState(false);
+  const [chatMessages, setChatMessages] = useState<LiveChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [isChatPending, setIsChatPending] = useState(false);
 
   // Fetch lecture if resuming
   useEffect(() => {
@@ -166,6 +190,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const isRecording = connectionState === 'recording';
   const isConnecting = connectionState === 'connecting';
@@ -207,7 +232,162 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
     }
   };
 
+  const buildTranscriptContext = useCallback(() => {
+    const recentSegments = segments.slice(-TRANSCRIPT_CONTEXT_SEGMENT_LIMIT);
+    const committed = recentSegments.map((segment) => `[${segment.time}] ${segment.text}`);
+    const partial = partialTranscript.trim();
+
+    if (partial) {
+      committed.push(`[LIVE] ${partial}`);
+    }
+
+    return committed.join('\n');
+  }, [partialTranscript, segments]);
+
+  const handleChatSubmit = useCallback(async (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+
+    const question = chatInput.trim();
+    if (!question || isChatPending) return;
+
+    streamAbortRef.current?.abort();
+    const abortController = new AbortController();
+    streamAbortRef.current = abortController;
+
+    const now = Date.now();
+    const assistantId = `chat-assistant-${now}`;
+    const userMessage: LiveChatMessage = {
+      id: `chat-user-${now}`,
+      role: 'user',
+      content: question,
+      createdAt: formatNowTime(),
+    };
+    const assistantMessage: LiveChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      createdAt: formatNowTime(),
+    };
+    const previousMessages = chatMessages
+      .slice(-TRANSCRIPT_CONTEXT_SEGMENT_LIMIT)
+      .map(({ role, content }) => ({ role, content }));
+    const transcript = buildTranscriptContext();
+
+    setChatMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setChatInput('');
+    setChatError(null);
+    setIsChatPending(true);
+
+    const appendAssistantDelta = (delta: string) => {
+      setChatMessages((prev) => prev.map((message) => (
+        message.id === assistantId
+          ? { ...message, content: `${message.content}${delta}` }
+          : message
+      )));
+    };
+
+    const updateAssistantMeta = (payload: LiveChatStreamPayload) => {
+      setChatMessages((prev) => prev.map((message) => (
+        message.id === assistantId
+          ? {
+              ...message,
+              content: payload.answer ?? message.content,
+              grounding: payload.grounding ?? message.grounding,
+              model: payload.model ?? message.model,
+            }
+          : message
+      )));
+    };
+
+    const processSseBlock = (block: string) => {
+      let eventName = 'message';
+      const dataLines: string[] = [];
+
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith('event:')) {
+          eventName = line.slice('event:'.length).trim();
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice('data:'.length).trimStart());
+        }
+      }
+
+      const rawData = dataLines.join('\n').trim();
+      if (!rawData) return;
+
+      const payload = JSON.parse(rawData) as LiveChatStreamPayload;
+      if (eventName === 'error') {
+        throw new Error(payload.message || 'AI streaming response failed.');
+      }
+      if (eventName === 'meta' || eventName === 'done') {
+        updateAssistantMeta(payload);
+        return;
+      }
+      if (payload.delta) {
+        appendAssistantDelta(payload.delta);
+      }
+    };
+
+    try {
+      const response = await fetch(`${API_CONFIG.BASE_URL}${ENDPOINTS.CHAT.LIVE_STREAM}`, {
+        method: 'POST',
+        credentials: 'include',
+        signal: abortController.signal,
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question,
+          transcript,
+          messages: previousMessages,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error('AI chat request failed.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split(/\r\n\r\n|\n\n/);
+        buffer = blocks.pop() ?? '';
+        blocks.forEach(processSseBlock);
+      }
+
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        processSseBlock(buffer);
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
+      const message = err instanceof Error ? err.message : 'AI chat request failed.';
+      setChatError(message);
+      setChatMessages((prev) => prev.map((messageItem) => (
+        messageItem.id === assistantId && !messageItem.content
+          ? { ...messageItem, content: message }
+          : messageItem
+      )));
+    } finally {
+      if (streamAbortRef.current === abortController) {
+        streamAbortRef.current = null;
+      }
+      setIsChatPending(false);
+    }
+  }, [buildTranscriptContext, chatInput, chatMessages, isChatPending]);
+
   const cleanupAudio = useCallback(() => {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
@@ -260,7 +440,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
           console.log('[Sync] Chunk uploaded successfully.');
         } catch (err) {
           console.error('[Sync] Failed to upload chunk', err);
-          setError('오디오 임시 저장 실패. 네트워크를 확인하세요.');
+          setError('오디오 임시 저장에 실패했습니다. 네트워크를 확인해주세요.');
         }
       };
       mediaRecorderRef.current.stop();
@@ -302,7 +482,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
           const fullTranscript = segments.map(s => s.text).join(' ');
           if (fullTranscript.trim()) {
             // Also sync to messages table for LangGraph context
-            await syncTranscriptToBackend(fullTranscript, true);
+            await syncTranscriptToBackend(fullTranscript);
             // Include in the final record saving request
             formData.append('transcript', fullTranscript);
           }
@@ -318,7 +498,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
           onEnd?.();
         } catch (err) {
           console.error('[Sync] Failed to save final record', err);
-          setError('최종 저장 실패.');
+          setError('최종 저장에 실패했습니다.');
         }
       };
       mediaRecorderRef.current.stop();
@@ -329,7 +509,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
     cleanupAudio();
     setConnectionState('standby');
     setPartialTranscript('');
-  }, [cleanupAudio, elapsedSeconds, currentLectureId, onEnd]);
+  }, [cleanupAudio, elapsedSeconds, currentLectureId, onEnd, segments]);
 
 
   const start = useCallback(async () => {
@@ -509,7 +689,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
       }
     } catch (err) {
       console.error(err);
-      setError('복구 실패');
+      setError('복구에 실패했습니다.');
     } finally {
       setIsRecovering(false);
       setShowRecoveryModal(false);
@@ -619,7 +799,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
               {segments.length === 0 && !partialTranscript && (
                 <div className="flex h-full min-h-[260px] flex-col items-center justify-center rounded-3xl border border-dashed border-[#c5c6cd] bg-[#f7f9fb] px-8 text-center">
                   <Mic className="mb-4 h-10 w-10 text-[#75777d]" />
-                  <p className="text-lg font-black text-[#091426]">강의를 시작하면 전사가 표시됩니다</p>
+                  <p className="text-lg font-black text-[#091426]">강의를 시작하면 전사가 표시됩니다.</p>
                 </div>
               )}
               {segments.map((item) => (
@@ -633,7 +813,7 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
                 <div className="flex gap-8">
                   <div className="w-14 shrink-0 pt-1.5"><span className="text-xs font-black tracking-wider text-[#006b5f]">LIVE</span></div>
                   <p className="text-[19px] italic leading-[1.75] text-[#191c1e]/80">
-                    {partialTranscript || (isRecording ? '말씀하시면 표시됩니다' : '마이크 대기 중...')}
+                    {partialTranscript || (isRecording ? '말씀하시면 표시됩니다.' : '마이크 대기 중...')}
                     <span className="ml-1 inline-block h-[1.1em] w-[3px] animate-pulse bg-[#006b5f] align-middle" />
                   </p>
                 </div>
@@ -644,11 +824,81 @@ export default function LiveLectureRoom({ onEnd, resumeId }: LiveLectureRoomProp
           <aside className="hidden w-[400px] shrink-0 flex-col overflow-hidden rounded-3xl border border-[#e0e3e5]/80 bg-white shadow-2xl xl:flex 2xl:w-[440px]">
             <div className="flex items-center justify-between border-b border-[#e0e3e5]/70 bg-[#f2f4f6] px-6 py-5">
               <div className="flex items-center gap-3">
-                <Sparkles className="h-6 w-6 text-[#006b5f]" />
-                <h3 className="text-lg font-black text-[#091426]">AI 질의응답</h3>
+                <Sparkles className="h-6 w-6 fill-[#006b5f]/20 text-[#006b5f]" />
+                <div>
+                  <h3 className="text-lg font-black text-[#091426]">AI 질의응답</h3>
+                  <p className="mt-0.5 text-xs font-bold text-[#75777d]">최근 전사를 기준으로 답변</p>
+                </div>
               </div>
             </div>
-            <div className="flex-1 p-6 text-center text-sm text-[#75777d]">강의가 시작되면 AI 튜터와 대화할 수 있습니다.</div>
+
+            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-6">
+              <div className="flex justify-center">
+                <span className="rounded-full bg-[#eceef0] px-4 py-1.5 text-[11px] font-black uppercase tracking-[0.18em] text-[#75777d]">
+                  Transcript window: last {TRANSCRIPT_CONTEXT_SEGMENT_LIMIT}
+                </span>
+              </div>
+
+              {chatMessages.length === 0 && (
+                <div className="rounded-3xl border border-dashed border-[#c5c6cd] bg-[#f7f9fb] px-5 py-8 text-center">
+                  <Bot className="mx-auto mb-3 h-9 w-9 text-[#006b5f]" />
+                  <p className="text-sm font-black text-[#091426]">강의 전사 기반으로 질문하세요</p>
+                  <p className="mt-2 text-xs font-medium leading-relaxed text-[#75777d]">
+                    질문을 보내면 현재 전사 스냅샷과 이전 대화가 함께 전송됩니다.
+                  </p>
+                </div>
+              )}
+
+              {chatMessages.map((message) => (
+                <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-3'}>
+                  {message.role === 'assistant' && (
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#62fae3] shadow-sm">
+                      <Bot className="h-5 w-5 text-[#00201c]" />
+                    </div>
+                  )}
+                  <div className={message.role === 'user'
+                    ? 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-none bg-[#091426] px-5 py-3.5 text-sm leading-relaxed text-white shadow-sm'
+                    : 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-none border border-[#c5c6cd]/30 bg-[#f2f4f6] px-5 py-4 text-sm leading-relaxed text-[#191c1e] shadow-sm'}>
+                    {message.content || (message.role === 'assistant' && isChatPending ? '답변 작성 중...' : '')}
+                    {message.role === 'assistant' && isChatPending && !message.content && (
+                      <span className="ml-1 inline-block h-[1em] w-[3px] animate-pulse bg-[#006b5f] align-middle" />
+                    )}
+                    {message.role === 'assistant' && (message.grounding || message.model) && (
+                      <div className="mt-3 border-t border-[#c5c6cd]/30 pt-3 text-[11px] font-bold uppercase tracking-[0.12em] text-[#75777d]">
+                        {message.grounding ?? 'grounding_unknown'} · {message.model ?? 'model_unknown'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {chatError && (
+                <div className="rounded-2xl border border-[#ba1a1a]/20 bg-[#ffdad6] px-4 py-3 text-sm font-bold text-[#93000a]">
+                  {chatError}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-[#e0e3e5]/70 bg-white p-6">
+              <form onSubmit={handleChatSubmit} className="relative flex items-center">
+                <input
+                  className="w-full rounded-2xl border border-[#c5c6cd]/60 bg-white py-4 pl-5 pr-14 text-sm text-[#191c1e] outline-none transition placeholder:text-[#75777d] focus:border-[#006b5f] focus:ring-4 focus:ring-[#006b5f]/10 disabled:bg-[#f2f4f6]"
+                  placeholder="강의 내용에 대해 질문하세요..."
+                  type="text"
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  disabled={isChatPending}
+                />
+                <button
+                  type="submit"
+                  disabled={isChatPending || !chatInput.trim()}
+                  className="absolute right-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[#091426] text-white shadow-sm transition hover:bg-[#091426]/90 disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-label="질문 전송"
+                >
+                  <ArrowUp className="h-5 w-5" />
+                </button>
+              </form>
+            </div>
           </aside>
         </div>
 

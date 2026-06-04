@@ -12,10 +12,13 @@ import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+import httpx
 import uvicorn
 
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +40,104 @@ UNSAFE_BUNDLED_TEXT_MARKERS = (
     "[출처 필요]",
 )
 UNSAFE_BUNDLED_TEXT_SCAN_LIMIT = 2048
+
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_OPENROUTER_MODEL = "openrouter/free"
+MAX_CHAT_HISTORY_MESSAGES = 20
+MAX_TRANSCRIPT_CHARS = 12000
+MAX_QUESTION_CHARS = 2000
+MAX_MESSAGE_CHARS = 4000
+
+
+class LiveChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
+
+
+class LiveChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    transcript: str = Field(default="", max_length=MAX_TRANSCRIPT_CHARS)
+    messages: list[LiveChatMessage] = Field(default_factory=list, max_length=MAX_CHAT_HISTORY_MESSAGES)
+
+
+class LiveChatResponse(BaseModel):
+    answer: str
+    grounding: Literal["transcript_only", "transcript_and_general_knowledge", "general_knowledge"]
+    model: str
+
+
+def bounded_text(value: str, max_chars: int) -> str:
+    text = (value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def build_grounding(transcript: str) -> str:
+    if transcript.strip():
+        return "transcript_and_general_knowledge"
+    return "general_knowledge"
+
+
+
+
+def provider_error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+        message = payload.get("error", {}).get("message")
+        if isinstance(message, str) and message.strip():
+            safe_message = message.split(". Manage it", 1)[0].strip()
+            safe_message = re.sub(r"https?://\S+", "[redacted-url]", safe_message)
+            return safe_message
+    except ValueError:
+        pass
+    return "OpenRouter chat request failed"
+
+
+
+
+def sse_event(payload: dict, event: str | None = None) -> str:
+    prefix = f"event: {event}\n" if event else ""
+    return f"{prefix}data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def get_live_chat_runtime(x_internal_chat_secret: str | None) -> tuple[str, str]:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    model = os.environ.get("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL).strip() or DEFAULT_OPENROUTER_MODEL
+    expected_secret = os.environ.get("LIVE_CHAT_WORKER_SECRET", "").strip()
+
+    if not expected_secret:
+        raise HTTPException(status_code=500, detail="LIVE_CHAT_WORKER_SECRET is missing")
+
+    if x_internal_chat_secret != expected_secret:
+        raise HTTPException(status_code=403, detail="Invalid internal chat secret")
+
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY is missing")
+
+    return api_key, model
+
+
+def build_live_chat_messages(request: LiveChatRequest) -> list[dict[str, str]]:
+    transcript = bounded_text(request.transcript, MAX_TRANSCRIPT_CHARS)
+    transcript_block = transcript if transcript else "현재 제공된 강의 전사가 없습니다."
+
+    system_prompt = (
+        "당신은 실시간 강의 전사와 동기화된 학습 보조 AI입니다.\n"
+        "아래 강의 전사를 최우선 근거로 사용하세요. 전사가 답변을 직접 뒷받침하면 '전사 기반'이라고 밝혀주세요.\n"
+        "전사만으로 부족하면 일반 지식으로 보완하되, 반드시 '일반 지식 보충'이라고 구분하세요.\n"
+        "한국어 질문에는 한국어로 간결하고 실용적으로 답하세요.\n\n"
+        "[현재 강의 전사 스냅샷]\n"
+        f"{transcript_block}"
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for message in request.messages[-MAX_CHAT_HISTORY_MESSAGES:]:
+        content = message.content.strip()
+        if content:
+            messages.append({"role": message.role, "content": content})
+    messages.append({"role": "user", "content": request.question.strip()})
+    return messages
 
 
 @dataclass
@@ -155,6 +256,8 @@ async def root():
         "endpoints": {
             "ws": "/stt/stream",
             "ws_simulate": "/stt/simulate",
+            "live_chat": "/llm/chat",
+            "live_chat_stream": "/llm/chat/stream",
             "health": "/health",
             "texts": "/texts",
         },
@@ -178,6 +281,137 @@ async def list_texts():
         size = f.stat().st_size
         texts.append({"name": f.name, "size": size, "chars": len(content)})
     return {"texts": texts, "directory": str(TEXT_DIR)}
+
+
+@app.post("/llm/chat", response_model=LiveChatResponse)
+async def live_llm_chat(
+    request: LiveChatRequest,
+    x_internal_chat_secret: str | None = Header(default=None),
+):
+    api_key, model = get_live_chat_runtime(x_internal_chat_secret)
+    messages = build_live_chat_messages(request)
+    grounding = build_grounding(request.transcript)
+
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(
+                OPENROUTER_CHAT_COMPLETIONS_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "X-Title": "tu-capstone-live-chat",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        detail = provider_error_message(exc.response)
+        logger.warning("OpenRouter chat request failed status=%s detail=%s", exc.response.status_code, detail)
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        logger.warning("OpenRouter chat request error: %s", exc.__class__.__name__)
+        raise HTTPException(status_code=502, detail="OpenRouter chat request error") from exc
+
+    try:
+        answer = payload["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        logger.warning("OpenRouter chat response missing content")
+        raise HTTPException(status_code=502, detail="OpenRouter chat response missing content") from exc
+
+    if not answer:
+        raise HTTPException(status_code=502, detail="OpenRouter chat response was empty")
+
+    return LiveChatResponse(answer=answer, grounding=grounding, model=model)
+
+
+async def stream_openrouter_chat(request: LiveChatRequest, api_key: str, model: str):
+    messages = build_live_chat_messages(request)
+    grounding = build_grounding(request.transcript)
+    answer_parts: list[str] = []
+
+    yield sse_event({"grounding": grounding, "model": model}, event="meta")
+
+    try:
+        timeout = httpx.Timeout(connect=5.0, write=5.0, pool=5.0, read=None)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
+                OPENROUTER_CHAT_COMPLETIONS_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "X-Title": "tu-capstone-live-chat",
+                },
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "stream": True,
+                },
+            ) as response:
+                if response.status_code >= 400:
+                    detail = provider_error_message(response)
+                    logger.warning("OpenRouter stream request failed status=%s detail=%s", response.status_code, detail)
+                    yield sse_event({"message": detail}, event="error")
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line or line.startswith(":"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if chunk.get("error"):
+                        message = chunk.get("error", {}).get("message") or "OpenRouter stream error"
+                        yield sse_event({"message": message}, event="error")
+                        return
+
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    content = delta.get("content") or ""
+                    if content:
+                        answer_parts.append(content)
+                        yield sse_event({"delta": content})
+    except httpx.HTTPError as exc:
+        logger.warning("OpenRouter stream request error: %s", exc.__class__.__name__)
+        yield sse_event({"message": "OpenRouter stream request error"}, event="error")
+        return
+
+    answer = "".join(answer_parts).strip()
+    if not answer:
+        yield sse_event({"message": "OpenRouter stream response was empty"}, event="error")
+        return
+
+    yield sse_event({"answer": answer, "grounding": grounding, "model": model}, event="done")
+
+
+@app.post("/llm/chat/stream")
+async def live_llm_chat_stream(
+    request: LiveChatRequest,
+    x_internal_chat_secret: str | None = Header(default=None),
+):
+    api_key, model = get_live_chat_runtime(x_internal_chat_secret)
+    return StreamingResponse(
+        stream_openrouter_chat(request, api_key, model),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.websocket("/stt/stream")

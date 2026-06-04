@@ -39,6 +39,10 @@ export const ENDPOINTS = {
   },
   RECORD: {
     // No redundant internal endpoints
+  },
+  CHAT: {
+    LIVE: '/api/chat/live',
+    LIVE_STREAM: '/api/chat/live/stream',
   }
 } as const;
 

@@ -55,3 +55,7 @@ minio:
   access-key: ${MINIO_ACCESS_KEY:minioadmin}
   secret-key: ${MINIO_SECRET_KEY:minioadmin}
   bucket: ${MINIO_BUCKET:tucapstone}
+
+agent-worker:
+  base-url: ${AGENT_WORKER_BASE_URL:http://agent-worker:8765}
+  live-chat-secret: ${LIVE_CHAT_WORKER_SECRET:}
